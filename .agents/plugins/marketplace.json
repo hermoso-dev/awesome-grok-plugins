@@ -3,5 +3,36 @@
   "interface": {
     "displayName": "Awesome Grok Plugins"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "hol-guard-grok-plugin",
+      "displayName": "HOL Guard",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hashgraph-online/hol-guard-grok-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development & Workflow",
+      "description": "Security plugin for protecting Grok Build with HOL Guard: harness protection, approval broker, and plugin scanner integration.",
+      "keywords": [
+        "hol-guard",
+        "ai-security",
+        "plugin-scanner",
+        "mcp",
+        "grok",
+        "grok-build",
+        "skills"
+      ],
+      "author": {
+        "name": "Hashgraph Online",
+        "email": "dev@hol.org",
+        "url": "https://github.com/hashgraph-online"
+      },
+      "homepage": "https://github.com/hashgraph-online/hol-guard-grok-plugin",
+      "version": "0.1.0"
+    }
+  ]
 }

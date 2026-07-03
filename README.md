@@ -117,7 +117,7 @@ The official xAI plugin marketplace lives at [xai-org/plugin-marketplace](https:
 
 ### Development & Workflow
 
-<!-- Add your plugin here in alphabetical order by display name -->
+- [HOL Guard](https://github.com/hashgraph-online/hol-guard-grok-plugin) - Security plugin for protecting Grok Build with HOL Guard: harness protection, approval broker, and plugin scanner integration.
 
 ### Tools & Integrations
 
