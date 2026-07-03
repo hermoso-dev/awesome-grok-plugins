@@ -4,7 +4,7 @@ Thanks for helping grow the Grok plugin ecosystem!
 
 ## How Submissions Work
 
-You add a single line to `README.md`. That's it. A maintainer-verified generator mirrors your plugin bundle from your source repo and regenerates the catalog files (`plugins.json`, `marketplace.json`). You never need to copy plugin files into this repo yourself.
+You add a single line to `README.md`. That's it. A maintainer-verified generator mirrors your plugin from its source repo and regenerates the catalog files (`plugins.json`, `marketplace.json`). You never need to copy plugin files into this repo yourself.
 
 ```
 Your PR:  README.md (+1 line)
@@ -63,10 +63,11 @@ plugin-scanner scan . --format text
 
 You need a score of **80/130** or higher with **no critical or high severity findings**. Save the output to include in your PR description.
 
-### Step 3: Verify your plugin repo has the required files
+### Step 3: Verify your plugin repo has the required structure
 
 Your plugin repo must contain:
-- `.grok-plugin/plugin.json` (valid manifest)
+- `.grok-plugin/plugin.json` OR `.claude-plugin/plugin.json` (valid manifest)
+- At least one plugin component: `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, `.mcp.json`, or `.lsp.json`
 - `SECURITY.md` (vulnerability disclosure policy)
 - `LICENSE` (MIT or Apache-2.0 recommended)
 - `README.md` (clear description)
@@ -129,14 +130,15 @@ plugin-scanner verify . --format text
 
 Your plugin repository must include:
 
-1. **`.grok-plugin/plugin.json`** — Valid manifest with required fields
-2. **`SECURITY.md`** — Vulnerability disclosure policy
-3. **`LICENSE`** — MIT or Apache-2.0 recommended
-4. **`README.md`** — Clear description of what the plugin does
-5. **No hardcoded secrets** — Scanner will flag API keys, tokens, passwords
-6. **No dangerous MCP commands** — No `rm -rf`, `sudo`, `curl | sh`, `eval`, `exec` patterns
-7. **SHA-pinned GitHub Actions** — If you use Actions, pin to commit SHAs
-8. **Dependency lockfiles** — `package-lock.json` or `requirements-lock.txt`
+1. **`.grok-plugin/plugin.json`** (or `.claude-plugin/plugin.json`) — Valid manifest with required fields
+2. **At least one component** — `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, `.mcp.json`, or `.lsp.json`
+3. **`SECURITY.md`** — Vulnerability disclosure policy
+4. **`LICENSE`** — MIT or Apache-2.0 recommended
+5. **`README.md`** — Clear description of what the plugin does
+6. **No hardcoded secrets** — Scanner will flag API keys, tokens, passwords
+7. **No dangerous MCP commands** — No `rm -rf`, `sudo`, `curl | sh`, `eval`, `exec` patterns
+8. **SHA-pinned GitHub Actions** — If you use Actions, pin to commit SHAs
+9. **Dependency lockfiles** — `package-lock.json` or `requirements-lock.txt`
 
 ### Scanner Score Breakdown
 
@@ -188,38 +190,6 @@ jobs:
           upload_sarif: true
 ```
 
-### Strict Security Gate (For High-Trust Plugins)
-
-```yaml
-name: HOL Plugin Scanner — Strict
-
-on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
-
-permissions:
-  contents: read
-  security-events: write
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: HOL Plugin Scanner
-        uses: hashgraph-online/ai-plugin-scanner-action@v1
-        with:
-          plugin_dir: "."
-          mode: scan
-          min_score: 90
-          fail_on_severity: medium
-          format: sarif
-          upload_sarif: true
-```
-
 ## Plugin Repo Requirements
 
 Your plugin source repo must be structured so the generator can find it:
@@ -227,10 +197,16 @@ Your plugin source repo must be structured so the generator can find it:
 ```
 your-plugin-repo/
   .grok-plugin/
-    plugin.json        # Required - plugin manifest
+    plugin.json              # Required - plugin manifest
+  .mcp.json                  # Optional - MCP server configs
   assets/
-    icon.svg           # Required - plugin icon (SVG preferred, PNG acceptable)
-  ...                  # Other plugin files (skills, commands, etc.)
+    icon.svg                 # Required - plugin icon (SVG preferred)
+  skills/                    # SKILL.md files
+  commands/                  # Slash command definitions
+  agents/                    # Subagent definitions
+  hooks/
+    hooks.json               # Lifecycle hooks
+  ...
 ```
 
 ### plugin.json
@@ -244,35 +220,87 @@ Must be valid JSON at `.grok-plugin/plugin.json` with at minimum:
   "description": "What this plugin does",
   "repository": "https://github.com/<owner>/<repo>",
   "license": "MIT",
-  "interface": {
-    "displayName": "My Plugin",
-    "shortDescription": "Brief one-liner",
-    "composerIcon": "./assets/icon.svg"
-  }
+  "keywords": ["my-plugin"]
 }
 ```
 
 **Required fields:**
-- `name` - machine-readable plugin identifier (lowercase, kebab-case)
+- `name` - machine-readable plugin identifier (kebab-case, lowercase)
 - `version` - semver version string
 - `description` - what the plugin does
 - `repository` - GitHub repository URL
 - `license` - SPDX license identifier
-- `interface.composerIcon` - path to the icon file (relative to plugin root)
+
+**Recommended fields:**
+- `author` - object with `name`, `email`, `url`
+- `homepage` - project URL
+- `keywords` - brand-scoped terms that trigger plugin suggestions (avoid generic terms)
+- `skills`, `commands`, `mcpServers`, `hooks` - paths to components if non-standard
+
+### Component Paths
+
+Grok Build auto-discovers components in standard locations. Only override paths in `plugin.json` if your layout differs:
+
+| Component | Default Location | Override Key |
+|-----------|-----------------|--------------|
+| Skills | `skills/` | `skills` |
+| Commands | `commands/` | `commands` |
+| Agents | `agents/` | `agents` |
+| MCP servers | `.mcp.json` | `mcpServers` |
+| Hooks | `hooks/hooks.json` | `hooks` |
 
 ### Icon
 
 - **Format:** SVG preferred. PNG also accepted.
-- **Size:** 512x512px recommended. Must read clearly at small sizes (32x32).
+- **Size:** 512x512px recommended.
 - **Location:** `assets/icon.svg` (or `assets/icon.png`)
-- **Style:** Simple, distinctive. Avoid text-heavy designs.
 - **File size:** Keep under 50KB. Optimize SVGs (no embedded raster images).
+
+### Self-contained Marketplace
+
+Your plugin repo can include its own `.grok-plugin/marketplace.json` for standalone install:
+
+```json
+{
+  "name": "my-plugin-marketplace",
+  "description": "My plugin",
+  "owner": { "name": "Your Name" },
+  "plugins": [
+    {
+      "name": "my-plugin",
+      "description": "What it does.",
+      "category": "development",
+      "source": { "type": "local", "path": "./" }
+    }
+  ]
+}
+```
+
+This lets users install directly: `grok plugin marketplace add your-org/your-plugin`
+
+### Publishing to the Official xAI Marketplace
+
+For the official [xai-org/plugin-marketplace](https://github.com/xai-org/plugin-marketplace), use a SHA-pinned remote source:
+
+```json
+{
+  "name": "my-plugin",
+  "description": "What it does.",
+  "category": "development",
+  "source": {
+    "source": "url",
+    "url": "https://github.com/my-org/my-plugin.git",
+    "sha": "<full-40-char-commit-sha>"
+  },
+  "homepage": "https://github.com/my-org/my-plugin",
+  "keywords": ["my-plugin"]
+}
+```
 
 ## Additional Requirements
 
 - Plugin must have a **public GitHub repository**
-- Must be **functional** with a valid `.grok-plugin/plugin.json` manifest
-- Must include an **icon** as described above
+- Must include at least one functional component (skills, commands, agents, hooks, MCP, or LSP)
 - **Must pass the HOL Plugin Scanner** (score ≥ 80, no critical/high findings)
 - **Must have scanner running in CI** (GitHub Action or equivalent)
 - **One plugin per PR**
@@ -290,7 +318,8 @@ Before submitting, verify:
 - [ ] `.github/workflows/hol-plugin-scanner.yml` exists and CI passes on main
 - [ ] `SECURITY.md` exists in your plugin repo
 - [ ] `LICENSE` exists in your plugin repo
-- [ ] `.grok-plugin/plugin.json` exists and is valid JSON
+- [ ] `.grok-plugin/plugin.json` (or `.claude-plugin/plugin.json`) exists and is valid JSON
+- [ ] At least one component exists (skills/, commands/, agents/, hooks/, .mcp.json, .lsp.json)
 - [ ] Plugin Scanner score ≥ 80/130 (paste score or link CI run in PR description)
 
 **In your PR:**
@@ -311,6 +340,8 @@ All PRs to this repo are automatically validated. The CI will check:
 
 ## Getting Help
 
+- Grok Build CLI: [x.ai/cli](https://x.ai/cli)
+- Official marketplace: [xai-org/plugin-marketplace](https://github.com/xai-org/plugin-marketplace)
 - Scanner docs: [HOL Guard](https://github.com/hashgraph-online/hol-guard)
 - Scanner action: [ai-plugin-scanner-action](https://github.com/hashgraph-online/ai-plugin-scanner-action)
 - Registry: [hol.org/registry/plugins](https://hol.org/registry/plugins)

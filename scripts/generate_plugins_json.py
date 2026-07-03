@@ -9,6 +9,11 @@ This script keeps three artifacts aligned:
 - plugins.json compatibility output for legacy tooling
 - .agents/plugins/marketplace.json for Grok repo marketplace installs
 - mirrored installable plugin bundles under plugins/<owner>/<repo>/
+
+Grok Build plugins use .grok-plugin/plugin.json (or .claude-plugin/plugin.json
+for Claude-compatible plugins). Unlike Codex plugins, the manifest is optional
+and plugins are defined by their components (skills/, commands/, agents/,
+hooks/, .mcp.json, .lsp.json).
 """
 
 from __future__ import annotations
@@ -31,6 +36,10 @@ REQUEST_TIMEOUT_SECONDS = 60
 MAX_RETRIES = 3
 USER_AGENT = "awesome-grok-plugins-generator"
 RAW_DEFAULT_BRANCH_REF = "HEAD"
+
+# Manifest discovery order: .grok-plugin first, then .claude-plugin (Claude compat)
+MANIFEST_DIRS = (".grok-plugin", ".claude-plugin")
+
 OPTIONAL_PLUGIN_FILES = (
     "README.md",
     "NOTICE.md",
@@ -44,14 +53,18 @@ OPTIONAL_PLUGIN_FILES = (
     "package-lock.json",
     "yarn.lock",
     ".grokignore",
+    ".mcp.json",
+    ".lsp.json",
     ".agents/plugins/marketplace.json",
   )
 
+# Standard plugin component directories/files to mirror
+COMPONENT_DIRS = ("skills", "commands", "agents", "hooks", "scripts", "bin", "assets")
+COMPONENT_FILES = (".mcp.json", ".lsp.json", "hooks/hooks.json")
+
 
 def normalize_relative_path(value: str) -> str:
-    # Normalize backslashes to forward slashes
     value = value.replace("\\", "/")
-    # Strip only a leading '/' or './' prefix, preserving dot-prefixed filenames
     if value.startswith('/'):
         value = value[1:]
     if value.startswith('./'):
@@ -109,19 +122,8 @@ def parse_plugins(readme_path: Path) -> list[dict[str, str]]:
                 "description": plugin_match.group(5).strip(),
                 "category": current_category,
                 "source": "awesome-grok-plugins",
-                "install_url": f"https://raw.githubusercontent.com/{owner}/{repo}/{RAW_DEFAULT_BRANCH_REF}/.grok-plugin/plugin.json",
             }
         )
-
-    repo_counts: dict[str, int] = {}
-    for plugin in plugins:
-        owner_repo = f"{plugin['owner']}/{plugin['repo']}"
-        repo_counts[owner_repo] = repo_counts.get(owner_repo, 0) + 1
-
-    for plugin in plugins:
-        owner_repo = f"{plugin['owner']}/{plugin['repo']}"
-        if repo_counts[owner_repo] > 1:
-            plugin["_mirror_subpath"] = "true"
 
     return plugins
 
@@ -148,40 +150,58 @@ def normalize_match_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
-def find_plugin_roots(names: set[str]) -> list[PurePosixPath]:
-    return [
-        PurePosixPath(name).parent.parent
-        for name in sorted(names)
-        if name.endswith("/.grok-plugin/plugin.json")
-    ]
+def find_manifest_path(names: set[str]) -> tuple[PurePosixPath, str] | None:
+    """Find the plugin manifest in the archive.
+
+    Returns (plugin_root, manifest_dir) where manifest_dir is
+    '.grok-plugin' or '.claude-plugin'.
+    """
+    for manifest_dir in MANIFEST_DIRS:
+        manifest_suffix = f"/{manifest_dir}/plugin.json"
+        matches = sorted(
+            [n for n in names if n.endswith(manifest_suffix)],
+            key=len,
+        )
+        if matches:
+            root = PurePosixPath(matches[0]).parent.parent
+            return root, manifest_dir
+    return None
 
 
-def resolve_plugin_root(archive: zipfile.ZipFile, names: set[str], plugin: dict[str, str]) -> PurePosixPath:
-    roots = find_plugin_roots(names)
-    if not roots:
-        raise ValueError("Archive does not contain .grok-plugin/plugin.json")
-    if len(roots) == 1:
-        return roots[0]
+def resolve_plugin_root(archive: zipfile.ZipFile, names: set[str], plugin: dict[str, str]) -> tuple[PurePosixPath, str]:
+    result = find_manifest_path(names)
+    if result is None:
+        raise ValueError("Archive does not contain .grok-plugin/plugin.json or .claude-plugin/plugin.json")
 
+    root, manifest_dir = result
+    # Check for multiple manifests at different roots
+    all_roots = []
+    for md in MANIFEST_DIRS:
+        suffix = f"/{md}/plugin.json"
+        for n in sorted(names):
+            if n.endswith(suffix):
+                all_roots.append((PurePosixPath(n).parent.parent, md))
+                break
+
+    if len(all_roots) <= 1:
+        return root, manifest_dir
+
+    # If multiple, try to match by plugin name
     expected = normalize_match_key(plugin["name"])
-    for root in roots:
-        manifest = load_manifest(archive, root)
-        interface = manifest.get("interface", {})
+    for r, md in all_roots:
+        manifest = load_manifest(archive, r, md)
         candidates = [
             manifest.get("name"),
-            root.name,
-            plugin_root_relative_path(root).split("/")[-1],
+            r.name,
         ]
-        if isinstance(interface, dict):
-            candidates.extend([interface.get("displayName"), interface.get("shortDescription")])
-        if any(normalize_match_key(candidate) == expected for candidate in candidates):
-            return root
+        if any(normalize_match_key(c) == expected for c in candidates):
+            return r, md
 
-    return roots[0]
+    return root, manifest_dir
 
 
-def load_manifest(archive: zipfile.ZipFile, plugin_root: PurePosixPath) -> dict[str, object]:
-    manifest_name = plugin_root.joinpath(".grok-plugin", "plugin.json").as_posix()
+def load_manifest(archive: zipfile.ZipFile, plugin_root: PurePosixPath, manifest_dir: str) -> dict[str, object]:
+    manifest_name = plugin_root.joinpath(manifest_dir, "plugin.json").as_posix()
     return json.loads(archive.read(manifest_name).decode("utf-8"))
 
 
@@ -190,8 +210,8 @@ def plugin_root_relative_path(plugin_root: PurePosixPath) -> str:
     return PurePosixPath(*repo_relative_parts).as_posix() if repo_relative_parts else ""
 
 
-def build_raw_manifest_url(plugin: dict[str, str], plugin_root_relative: str) -> str:
-    manifest_path = ".grok-plugin/plugin.json"
+def build_raw_manifest_url(plugin: dict[str, str], plugin_root_relative: str, manifest_dir: str) -> str:
+    manifest_path = f"{manifest_dir}/plugin.json"
     if plugin_root_relative:
         manifest_path = f"{plugin_root_relative}/{manifest_path}"
     return (
@@ -224,35 +244,38 @@ def collect_selected_paths(
     all_names: set[str],
     plugin_root: PurePosixPath,
     plugin: dict[str, str],
+    manifest_dir: str,
 ) -> set[str]:
-    selected = {".grok-plugin/plugin.json"}
+    selected = {f"{manifest_dir}/plugin.json"}
 
+    # Always include standard component directories if they exist
+    for comp_dir in COMPONENT_DIRS:
+        add_recursive_selection(selected, all_names, plugin_root, comp_dir)
+
+    # Include standard component files
+    for comp_file in COMPONENT_FILES:
+        add_recursive_selection(selected, all_names, plugin_root, comp_file)
+
+    # Include optional files
     for optional_name in OPTIONAL_PLUGIN_FILES:
-        candidate = plugin_root.joinpath(optional_name).as_posix()
-        if candidate in all_names:
-            selected.add(optional_name)
+        add_recursive_selection(selected, all_names, plugin_root, optional_name)
 
-    for key in ("skills", "scripts", "mcpServers", "apps", "app", "appConfig", "hooks"):
+    # Include manifest-referenced paths (overrides)
+    for key in ("skills", "scripts", "mcpServers", "apps", "app", "appConfig", "hooks", "commands", "agents"):
         value = manifest.get(key)
         if isinstance(value, str):
             add_recursive_selection(selected, all_names, plugin_root, value)
 
-    interface = manifest.get("interface")
-    if isinstance(interface, dict):
-        for key in ("composerIcon", "logo"):
-            value = interface.get(key)
-            if isinstance(value, str):
-                add_recursive_selection(selected, all_names, plugin_root, value)
-        screenshots = interface.get("screenshots")
-        if isinstance(screenshots, list):
-            for screenshot in screenshots:
-                if isinstance(screenshot, str):
-                    add_recursive_selection(selected, all_names, plugin_root, screenshot)
+    # Include icon/logo if referenced
+    for key in ("logo", "icon"):
+        value = manifest.get(key)
+        if isinstance(value, str):
+            add_recursive_selection(selected, all_names, plugin_root, value)
 
     return selected
 
 
-def mirror_plugin_bundle(plugin: dict[str, str]) -> tuple[dict[str, object], str, str]:
+def mirror_plugin_bundle(plugin: dict[str, str]) -> tuple[dict[str, object], str, str, str]:
     owner_repo = f"{plugin['owner']}/{plugin['repo']}"
     try:
         archive = fetch_repo_archive(plugin["owner"], plugin["repo"])
@@ -260,18 +283,16 @@ def mirror_plugin_bundle(plugin: dict[str, str]) -> tuple[dict[str, object], str
         raise ValueError(f"Failed to fetch {owner_repo}: {e}") from e
     names = {name for name in archive.namelist() if not name.endswith("/")}
     try:
-        plugin_root = resolve_plugin_root(archive, names, plugin)
+        plugin_root, manifest_dir = resolve_plugin_root(archive, names, plugin)
     except ValueError:
-        raise ValueError(f"Archive for {owner_repo} does not contain a matching .grok-plugin/plugin.json") from None
-    manifest = load_manifest(archive, plugin_root)
-    selected_paths = collect_selected_paths(manifest, names, plugin_root, plugin)
+        raise ValueError(f"Archive for {owner_repo} does not contain a matching plugin manifest") from None
+    manifest = load_manifest(archive, plugin_root, manifest_dir)
+    selected_paths = collect_selected_paths(manifest, names, plugin_root, plugin, manifest_dir)
 
     plugin_root_relative = plugin_root_relative_path(plugin_root)
-    use_subpath = plugin.get("_mirror_subpath") == "true"
     destination_root = PLUGINS_ROOT / plugin["owner"] / plugin["repo"]
-    if use_subpath and plugin_root_relative:
+    if plugin_root_relative:
         destination_root = destination_root / PurePosixPath(plugin_root_relative)
-    # Clear destination to avoid stale files from previous runs
     if destination_root.exists():
         shutil.rmtree(destination_root)
     destination_root.mkdir(parents=True, exist_ok=True)
@@ -280,33 +301,32 @@ def mirror_plugin_bundle(plugin: dict[str, str]) -> tuple[dict[str, object], str
         archive_name = plugin_root.joinpath(PurePosixPath(relative_path)).as_posix()
         destination_path = destination_root / PurePosixPath(relative_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        if relative_path == ".grok-plugin/plugin.json":
+        if relative_path == f"{manifest_dir}/plugin.json":
             destination_path.write_text(
                 json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
         else:
-            destination_path.write_bytes(archive.read(archive_name))
+            try:
+                destination_path.write_bytes(archive.read(archive_name))
+            except KeyError:
+                pass  # File listed but not in archive, skip
 
     marketplace_path = f"./plugins/{plugin['owner']}/{plugin['repo']}"
-    if use_subpath and plugin_root_relative:
-        marketplace_path = f"{marketplace_path}/{plugin_root_relative}"
 
-    return manifest, marketplace_path, plugin_root_relative
+    return manifest, marketplace_path, plugin_root_relative, manifest_dir
 
 
 def build_marketplace_entry(
     plugin: dict[str, str],
     manifest: dict[str, object],
     marketplace_path: str,
-    icon_path: str | None = None,
 ) -> dict[str, object]:
     manifest_name = str(manifest.get("name") or "").strip() or plugin["repo"]
-    interface = manifest.get("interface", {})
-    display_name = plugin["name"]  # from README, human-readable
+    display_name = plugin["name"]
     description = plugin.get("description", "").strip()
     if not description:
-        description = str(interface.get("shortDescription") or interface.get("longDescription") or "").strip()
+        description = str(manifest.get("description") or "").strip()
 
     entry: dict[str, object] = {
         "name": manifest_name,
@@ -323,8 +343,12 @@ def build_marketplace_entry(
     }
     if description:
         entry["description"] = description
-    if icon_path:
-        entry["icon"] = icon_path
+
+    # Grok plugins may have keywords, author, homepage
+    for key in ("keywords", "author", "homepage", "version"):
+        value = manifest.get(key)
+        if value:
+            entry[key] = value
 
     return entry
 
@@ -341,38 +365,15 @@ def main() -> None:
     for plugin in plugins:
         owner_repo = f"{plugin['owner']}/{plugin['repo']}"
         try:
-            manifest, marketplace_path, plugin_root_relative = mirror_plugin_bundle(plugin)
+            manifest, marketplace_path, plugin_root_relative, manifest_dir = mirror_plugin_bundle(plugin)
         except Exception as e:
             print(f"WARNING: Skipping {owner_repo} — {e}", file=sys.stderr)
             skipped.append(owner_repo)
             continue
-        plugin["install_url"] = build_raw_manifest_url(plugin, plugin_root_relative)
+        plugin["install_url"] = build_raw_manifest_url(plugin, plugin_root_relative, manifest_dir)
 
-        # Determine icon path if available and actually mirrored
-        icon_path: str | None = None
-        interface = manifest.get("interface", {})
-        if isinstance(interface, dict):
-            composer_icon = interface.get("composerIcon") or interface.get("logo")
-            if isinstance(composer_icon, str) and composer_icon.strip():
-                stripped = composer_icon.strip()
-                if not (stripped.startswith('[') and ('TODO' in stripped or 'PLACEHOLDER' in stripped)):
-                    rel = composer_icon
-                    if rel.startswith('./'):
-                        rel = rel[2:]
-                    elif rel.startswith('/'):
-                        rel = rel[1:]
-                    candidate = f"{marketplace_path}/{rel}"
-                    # Verify the file exists in the mirrored plugin directory
-                    local_root = PLUGINS_ROOT / plugin["owner"] / plugin["repo"]
-                    if plugin.get("_mirror_subpath") == "true" and plugin_root_relative:
-                        local_root = local_root / PurePosixPath(plugin_root_relative)
-                    abs_path = local_root / rel
-                    if abs_path.exists():
-                        icon_path = candidate
+        mirrored_entries.append(build_marketplace_entry(plugin, manifest, marketplace_path))
 
-        mirrored_entries.append(build_marketplace_entry(plugin, manifest, marketplace_path, icon_path))
-
-    # Filter out skipped plugins from public plugin list so counts stay accurate
     ok_plugins = [p for p in plugins if f"{p['owner']}/{p['repo']}" not in skipped]
 
     marketplace = {

@@ -6,14 +6,15 @@ Two validation paths:
 1. Bundle diff path (plugins/** changed):
    Validates committed plugin bundles against the contribution spec:
    - plugin.json exists and contains required fields
-   - composerIcon points to an existing file
    - README entry exists for the plugin
 
 2. README-entry path (README.md changed, no bundle):
    For new README entries that don't have a matching local bundle yet,
-   fetches the source repo archive and validates plugin.json and icon
-   presence there. This is the normal contributor flow: they add a
-   README line, the generator mirrors the bundle later.
+   fetches the source repo archive and validates plugin.json presence
+   and required fields.
+
+Grok plugins use .grok-plugin/plugin.json (or .claude-plugin/plugin.json
+for Claude-compatible plugins). The interface block is optional.
 
 Usage:
     python3 scripts/validate-plugin-pr.py [--base-ref <ref>]
@@ -37,8 +38,11 @@ REPO_ROOT = Path(__file__).parent.parent
 PLUGINS_DIR = REPO_ROOT / "plugins"
 README_PATH = REPO_ROOT / "README.md"
 
+# Manifest discovery order
+MANIFEST_DIRS = (".grok-plugin", ".claude-plugin")
+
 REQUIRED_MANIFEST_FIELDS = ["name", "version", "description", "repository", "license"]
-REQUIRED_INTERFACE_FIELDS = ["displayName", "shortDescription", "composerIcon"]
+OPTIONAL_INTERFACE_FIELDS = ["displayName", "shortDescription", "composerIcon"]
 ICON_EXTENSIONS = {".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico"}
 MAX_ICON_SIZE_BYTES = 50 * 1024  # 50KB
 REQUEST_TIMEOUT_SECONDS = 60
@@ -50,6 +54,9 @@ README_ENTRY_RE = re.compile(
     r"([^/]+)/([^)#]+?))(?:[?#][^)]*)?\)\s*[-\u2013]\s*(.+)",
     re.MULTILINE,
 )
+
+# Standard plugin components
+COMPONENT_DIRS = ("skills", "commands", "agents", "hooks", "assets")
 
 
 def git(*args: str) -> str:
@@ -74,21 +81,25 @@ def fetch_repo_archive(owner: str, repo: str) -> zipfile.ZipFile:
         return zipfile.ZipFile(io.BytesIO(response.read()))
 
 
-def find_plugin_root(archive: zipfile.ZipFile) -> PurePosixPath | None:
-    """Find the directory containing .grok-plugin/plugin.json in the archive."""
-    names = [n for n in archive.namelist() if n.endswith("/.grok-plugin/plugin.json")]
-    if not names:
-        return None
-    # If multiple, prefer root-level (shortest path)
-    names.sort(key=len)
-    return PurePosixPath(names[0]).parent.parent
+def find_plugin_root(archive: zipfile.ZipFile) -> tuple[PurePosixPath, str] | None:
+    """Find the directory containing a plugin manifest.
+
+    Returns (plugin_root, manifest_dir) or None.
+    """
+    for manifest_dir in MANIFEST_DIRS:
+        suffix = f"/{manifest_dir}/plugin.json"
+        names = [n for n in archive.namelist() if n.endswith(suffix)]
+        if names:
+            names.sort(key=len)
+            return PurePosixPath(names[0]).parent.parent, manifest_dir
+    return None
 
 
 def load_manifest_from_archive(
-    archive: zipfile.ZipFile, plugin_root: PurePosixPath
+    archive: zipfile.ZipFile, plugin_root: PurePosixPath, manifest_dir: str
 ) -> dict | None:
     """Load plugin.json from the archive at the given root."""
-    manifest_name = plugin_root.joinpath(".grok-plugin", "plugin.json").as_posix()
+    manifest_name = plugin_root.joinpath(manifest_dir, "plugin.json").as_posix()
     try:
         return json.loads(archive.read(manifest_name).decode("utf-8"))
     except (KeyError, json.JSONDecodeError):
@@ -100,24 +111,18 @@ def load_manifest_from_archive(
 # ---------------------------------------------------------------------------
 
 
-def validate_manifest_fields(manifest: dict) -> list[str]:
-    """Validate manifest fields. Works for both local and fetched manifests."""
+def validate_manifest_fields(manifest: dict) -> tuple[list[str], list[str]]:
+    """Validate manifest fields. Returns (errors, warnings).
+
+    Grok plugins don't require an interface block (unlike Codex).
+    """
     errors: list[str] = []
+    warnings: list[str] = []
 
     for field in REQUIRED_MANIFEST_FIELDS:
         val = manifest.get(field)
         if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"Missing or empty required field: {field}")
-
-    interface = manifest.get("interface")
-    if not isinstance(interface, dict):
-        errors.append("Missing or invalid 'interface' object in plugin.json")
-        return errors
-
-    for field in REQUIRED_INTERFACE_FIELDS:
-        val = interface.get(field)
-        if val is None or (isinstance(val, str) and not val.strip()):
-            errors.append(f"Missing or empty interface.{field}")
 
     version = manifest.get("version", "")
     if version and not re.match(r"^\d+\.\d+\.\d+", str(version)):
@@ -127,7 +132,41 @@ def validate_manifest_fields(manifest: dict) -> list[str]:
     if name and re.search(r"[A-Z\s]", str(name)):
         errors.append(f"Plugin name '{name}' should be lowercase and slug-safe (no spaces or uppercase)")
 
-    return errors
+    # Interface block is optional for Grok plugins
+    interface = manifest.get("interface")
+    if interface and isinstance(interface, dict):
+        for field in OPTIONAL_INTERFACE_FIELDS:
+            val = interface.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                warnings.append(f"interface.{field} is recommended but missing")
+    elif not interface:
+        warnings.append("No 'interface' block in plugin.json (recommended for marketplace display)")
+
+    return errors, warnings
+
+
+def find_local_manifest(plugin_dir: Path) -> tuple[Path, str] | None:
+    """Find the plugin manifest locally.
+
+    Returns (manifest_path, manifest_dir) or None.
+    """
+    for manifest_dir in MANIFEST_DIRS:
+        manifest_path = plugin_dir / manifest_dir / "plugin.json"
+        if manifest_path.exists():
+            return manifest_path, manifest_dir
+    return None
+
+
+def find_local_component_dirs(plugin_dir: Path) -> list[str]:
+    """Check which standard component directories/files exist."""
+    found = []
+    for comp_dir in COMPONENT_DIRS:
+        if (plugin_dir / comp_dir).is_dir():
+            found.append(comp_dir)
+    for comp_file in (".mcp.json", ".lsp.json", "hooks/hooks.json"):
+        if (plugin_dir / comp_file).exists():
+            found.append(comp_file)
+    return found
 
 
 def validate_local_bundle(plugin_dir: Path) -> tuple[list[str], list[str]]:
@@ -141,10 +180,12 @@ def validate_local_bundle(plugin_dir: Path) -> tuple[list[str], list[str]]:
         errors.append(f"Plugin directory does not exist: {rel_path}")
         return errors, warnings
 
-    manifest_path = plugin_dir / ".grok-plugin" / "plugin.json"
-    if not manifest_path.exists():
-        errors.append(f"Missing .grok-plugin/plugin.json in {rel_path}")
+    result = find_local_manifest(plugin_dir)
+    if result is None:
+        errors.append(f"Missing .grok-plugin/plugin.json (or .claude-plugin/plugin.json) in {rel_path}")
         return errors, warnings
+
+    manifest_path, manifest_dir = result
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -152,33 +193,37 @@ def validate_local_bundle(plugin_dir: Path) -> tuple[list[str], list[str]]:
         errors.append(f"plugin.json is not valid JSON: {e}")
         return errors, warnings
 
-    errors.extend(validate_manifest_fields(manifest))
+    manifest_errors, manifest_warnings = validate_manifest_fields(manifest)
+    errors.extend(manifest_errors)
+    warnings.extend(manifest_warnings)
 
-    # Validate icon locally
-    interface = manifest.get("interface", {})
-    composer_icon = str(interface.get("composerIcon", "")).strip()
-    if composer_icon:
-        icon_rel = composer_icon
-        if icon_rel.startswith("./"):
-            icon_rel = icon_rel[2:]
-        elif icon_rel.startswith("/"):
-            icon_rel = icon_rel[1:]
-        icon_path = plugin_dir / icon_rel
-        if not icon_path.exists():
-            errors.append(f"Icon file not found: {icon_rel} (resolved to {icon_path.relative_to(REPO_ROOT)})")
-        else:
-            suffix = icon_path.suffix.lower()
-            if suffix not in ICON_EXTENSIONS:
-                errors.append(f"Icon has unsupported format '{suffix}'. Use SVG (preferred) or PNG.")
-            size = icon_path.stat().st_size
-            if size > MAX_ICON_SIZE_BYTES:
-                errors.append(f"Icon is {size / 1024:.1f}KB, exceeds 50KB limit.")
-            if suffix == ".svg":
-                content = icon_path.read_text(encoding="utf-8", errors="replace")
-                if "data:image/" in content or "base64" in content:
-                    errors.append("SVG icon contains embedded base64 raster data.")
-                if "TODO" in content or "PLACEHOLDER" in content:
-                    errors.append("SVG icon contains TODO/PLACEHOLDER text.")
+    # Check for at least one component
+    components = find_local_component_dirs(plugin_dir)
+    if not components:
+        warnings.append(
+            f"No standard plugin components found (expected at least one of: "
+            f"{', '.join(COMPONENT_DIRS)}, .mcp.json, .lsp.json, hooks/hooks.json)"
+        )
+
+    # Validate icon if referenced
+    for key in ("logo", "icon"):
+        icon_val = str(manifest.get(key, "")).strip()
+        if icon_val:
+            icon_rel = icon_val
+            if icon_rel.startswith("./"):
+                icon_rel = icon_rel[2:]
+            elif icon_rel.startswith("/"):
+                icon_rel = icon_rel[1:]
+            icon_path = plugin_dir / icon_rel
+            if not icon_path.exists():
+                errors.append(f"Icon file not found: {icon_rel}")
+            else:
+                suffix = icon_path.suffix.lower()
+                if suffix not in ICON_EXTENSIONS:
+                    errors.append(f"Icon has unsupported format '{suffix}'. Use SVG (preferred) or PNG.")
+                size = icon_path.stat().st_size
+                if size > MAX_ICON_SIZE_BYTES:
+                    errors.append(f"Icon is {size / 1024:.1f}KB, exceeds 50KB limit.")
 
     # README entry check (warning only)
     parts = plugin_dir.relative_to(REPO_ROOT).parts
@@ -188,9 +233,6 @@ def validate_local_bundle(plugin_dir: Path) -> tuple[list[str], list[str]]:
         repo_pattern = rf"\[([^\]]+)\]\(https://github\.com/{re.escape(owner)}/{re.escape(repo_dir)}\)"
         if not re.search(repo_pattern, readme_content):
             warnings.append(f"No README.md entry found linking to https://github.com/{owner}/{repo_dir}")
-
-    if not (plugin_dir / ".grokignore").exists():
-        warnings.append("No .grokignore file found (recommended)")
 
     return errors, warnings
 
@@ -208,40 +250,37 @@ def validate_remote_repo(owner: str, repo: str) -> tuple[list[str], list[str]]:
     except Exception as e:
         return ([f"Failed to fetch source repo https://github.com/{owner}/{repo}: {e}"], [])
 
-    plugin_root = find_plugin_root(archive)
-    if plugin_root is None:
+    result = find_plugin_root(archive)
+    if result is None:
         errors.append(
             f"Source repo https://github.com/{owner}/{repo} does not contain "
-            f".grok-plugin/plugin.json"
+            f".grok-plugin/plugin.json or .claude-plugin/plugin.json"
         )
         return errors, warnings
 
-    manifest = load_manifest_from_archive(archive, plugin_root)
+    plugin_root, manifest_dir = result
+    manifest = load_manifest_from_archive(archive, plugin_root, manifest_dir)
     if manifest is None:
         errors.append("Could not read valid plugin.json from source repo")
         return errors, warnings
 
-    errors.extend(validate_manifest_fields(manifest))
+    manifest_errors, manifest_warnings = validate_manifest_fields(manifest)
+    errors.extend(manifest_errors)
+    warnings.extend(manifest_warnings)
 
-    # Check icon exists in the archive
-    interface = manifest.get("interface", {})
-    composer_icon = str(interface.get("composerIcon", "")).strip()
-    if composer_icon:
-        icon_rel = composer_icon
-        if icon_rel.startswith("./"):
-            icon_rel = icon_rel[2:]
-        elif icon_rel.startswith("/"):
-            icon_rel = icon_rel[1:]
-        icon_archive_path = plugin_root.joinpath(PurePosixPath(icon_rel)).as_posix()
-        try:
-            icon_data = archive.read(icon_archive_path)
-            if len(icon_data) > MAX_ICON_SIZE_BYTES:
-                errors.append(f"Icon is {len(icon_data) / 1024:.1f}KB, exceeds 50KB limit.")
-        except KeyError:
-            errors.append(
-                f"Icon file not found in source repo at: {icon_rel} "
-                f"(referenced by composerIcon in plugin.json)"
-            )
+    # Check for at least one component in the archive
+    names = archive.namelist()
+    has_component = False
+    for comp_dir in COMPONENT_DIRS:
+        if any(n.startswith(f"{plugin_root.joinpath(comp_dir)}/") for n in names):
+            has_component = True
+            break
+    for comp_file in (".mcp.json", ".lsp.json"):
+        if plugin_root.joinpath(comp_file).as_posix() in names:
+            has_component = True
+            break
+    if not has_component:
+        warnings.append("No standard plugin components found in source repo")
 
     return errors, warnings
 
@@ -270,7 +309,10 @@ def get_changed_plugin_dirs(base_ref: str) -> list[Path]:
 
         current = file_path if file_path.is_dir() else file_path.parent
         while current != PLUGINS_DIR and PLUGINS_DIR in current.parents:
-            if (current / ".grok-plugin" / "plugin.json").exists():
+            has_manifest = any(
+                (current / md / "plugin.json").exists() for md in MANIFEST_DIRS
+            )
+            if has_manifest:
                 changed_dirs.add(current)
                 break
             current = current.parent
@@ -279,29 +321,23 @@ def get_changed_plugin_dirs(base_ref: str) -> list[Path]:
 
 
 def get_new_readme_entries(base_ref: str) -> list[dict[str, str]]:
-    """Find new plugin entries added to README.md in this PR.
-
-    Returns list of dicts with keys: display_name, url, owner, repo, description.
-    """
-    # Get the diff of README.md
+    """Find new plugin entries added to README.md in this PR."""
     diff = git("diff", base_ref, "--", "README.md")
     if not diff:
         return []
 
-    # Get the base version of README to detect only truly new URLs
     base_readme = git("show", f"{base_ref}:README.md")
     base_urls = set()
     if base_readme:
         base_urls = {m.group(2) for m in README_ENTRY_RE.finditer(base_readme)}
 
-    # Extract added lines matching the plugin entry pattern
     new_entries: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
     for line in diff.splitlines():
         if not line.startswith("+") or line.startswith("+++"):
             continue
-        content = line[1:]  # strip the leading +
+        content = line[1:]
         match = README_ENTRY_RE.match(content.strip())
         if not match:
             continue
@@ -341,7 +377,6 @@ def main() -> None:
     rev_parse = git("rev-parse", "--verify", base_arg)
     if not rev_parse:
         print(f"WARNING: Base ref '{base_arg}' not found, skipping validation")
-        print("  (This is normal for the first commit on a new branch without CI)")
         sys.exit(0)
 
     has_failures = False
@@ -385,9 +420,11 @@ def main() -> None:
             owner, repo = entry["owner"], entry["repo"]
             label = f"{entry['display_name']} ({owner}/{repo})"
 
-            # Check if a local bundle already exists (generator may have run)
             local_dir = PLUGINS_DIR / owner / repo
-            if local_dir.exists() and (local_dir / ".grok-plugin" / "plugin.json").exists():
+            has_local = any(
+                (local_dir / md / "plugin.json").exists() for md in MANIFEST_DIRS
+            )
+            if local_dir.exists() and has_local:
                 print(f"  SKIP: {label} (local bundle exists, validated above)")
                 continue
 
@@ -420,7 +457,7 @@ def main() -> None:
         print(f"\nValidation passed with warnings: {total_warnings} warning(s)")
         sys.exit(0)
     else:
-        print(f"\nAll checks passed.")
+        print("\nAll checks passed.")
         sys.exit(0)
 
 
