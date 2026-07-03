@@ -1,0 +1,7 @@
+{
+  "name": "awesome-grok-plugins",
+  "interface": {
+    "displayName": "Awesome Grok Plugins"
+  },
+  "plugins": []
+}

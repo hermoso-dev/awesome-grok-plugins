@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "awesome-grok-plugins",
+  "version": "1.0.0",
+  "last_updated": "2026-07-03",
+  "total": 0,
+  "categories": [],
+  "plugins": []
+}
