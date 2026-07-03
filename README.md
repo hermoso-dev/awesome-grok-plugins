@@ -59,7 +59,11 @@ grok plugin install <plugin-name> --trust
 grok plugin marketplace add hashgraph-online/awesome-grok-plugins
 ```
 
-Inside Grok Build, type `/marketplace` to browse and install plugins interactively.
+Inside Grok Build, type `/marketplace` to browse and install plugins interactively. You can also use `/plugins`, `/skills`, `/hooks`, or `/mcps` to manage installed components.
+
+**Plugin discovery paths:** Grok Build loads plugins from `./.grok/plugins/`, `~/.grok/plugins/`, marketplace installs under `~/.grok/plugins/marketplaces/`, and custom paths via `--plugin-dir <PATH>`. MCP servers can also be configured in `~/.grok/config.toml` under `[mcp_servers]`.
+
+**Grok API + MCP:** The xAI API natively supports Remote MCP Tools via the `tools` parameter: `{"type": "mcp", "server_url": "...", "server_label": "..."}`. See [xAI Remote MCP docs](https://docs.x.ai/developers/tools/remote-mcp).
 
 ### Plugin Scanner (Recommended)
 
