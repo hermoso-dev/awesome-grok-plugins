@@ -123,6 +123,8 @@ The official xAI plugin marketplace lives at [xai-org/plugin-marketplace](https:
 
 <!-- Add your plugin here in alphabetical order by display name -->
 
+- [Hermoso](https://github.com/hermoso-ai/hermoso) - Marketing skills that research winning ads, generate on-brand image and video ads, publish to social channels, and run paid campaigns through the hermoso CLI.
+
 ---
 
 ## Plugin Development
